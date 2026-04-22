@@ -1,28 +1,32 @@
-# development-workflow Plugin — Design Spec
+# development-workflow — Design Spec
 
-A Claude Code plugin that guides software development through a structured, spec-driven workflow. Covers new feature development and bug fixes. Exposes 5 skills (slash commands), each representing a phase. State persists in JSON files so work survives session restarts. Intended to be open-sourced.
+A Python CLI tool (using the Anthropic SDK directly) that guides software development through a structured, spec-driven workflow. Covers new feature development and bug fixes. Exposes 5 steps, each representing a phase. State persists in JSON files so work survives session restarts. Intended to be open-sourced.
+
+Claude Code integration (slash commands) is an optional layer on top — the core tool runs standalone from any terminal.
 
 ---
 
 ## How It Works
 
-Each skill is a Claude Code slash command that shells out to a Python CLI (`workflow.py`). Python manages state, selects the model, builds the prompt (injecting only the fields needed from prior steps), calls the Claude API, and writes output JSON. Claude Code itself is just the entry point.
+`workflow.py` is the entrypoint — a Python CLI that calls the Anthropic SDK directly. It manages state, selects the model per step, builds the prompt (injecting only the fields needed from prior steps), calls `anthropic.Anthropic().messages.create(...)`, and writes output JSON. No Claude Code dependency required.
+
+Tools needed by each step (file reads, bash commands, git diff) are implemented as Anthropic SDK tool definitions — Python handles the tool call loop itself.
 
 ```
-Claude Code IDE
-    ↓ /design-context
-workflow.py step context
-    ↓ calls Claude API (model: Haiku)
+terminal
+    $ python workflow.py step context
+    ↓ Anthropic SDK (model: Haiku) + custom tools
     ↓ writes .claude/workflow/context.json
     → displays output, prompts user approval / feedback loop
 
-    ↓ /design-spec
-workflow.py step spec
+    $ python workflow.py step spec
     ↓ reads context.json (selective fields only)
-    ↓ calls Claude API (model: Sonnet)
+    ↓ Anthropic SDK (model: Sonnet)
     ↓ writes spec.json
     ...and so on
 ```
+
+Claude Code integration is optional: a `plugin.yaml` can register these as slash commands so users can run `/design-context` from the IDE, but the Python CLI works without it.
 
 ---
 
@@ -31,22 +35,24 @@ workflow.py step spec
 ```
 claude/plugins/development-workflow/
 ├── DESIGN.MD                    ← this file
-├── plugin.yaml                  ← skill definitions (slash command registry)
+├── pyproject.toml               ← package definition, deps (anthropic, click/typer)
 ├── workflow.py                  ← CLI entry: `python workflow.py step <name>`
 ├── state.py                     ← read/write .claude/workflow/*.json
 ├── models.py                    ← model selection + prompt caching config
+├── tools.py                     ← Anthropic SDK tool definitions (read_file, run_bash, git_diff)
 ├── steps/
 │   ├── context.py
 │   ├── spec.py
 │   ├── tests.py
 │   ├── review.py
 │   └── merge.py
-└── prompts/
-    ├── context.md               ← prompt template injected at each step
-    ├── spec.md
-    ├── tests.md
-    ├── review.md
-    └── merge.md
+├── prompts/
+│   ├── context.md               ← system prompt template for each step
+│   ├── spec.md
+│   ├── tests.md
+│   ├── review.md
+│   └── merge.md
+└── plugin.yaml                  ← optional: Claude Code slash command definitions
 ```
 
 ### State Files (live in the project being worked on)
@@ -87,9 +93,11 @@ Each step runs a refinement loop before writing JSON:
 
 ---
 
-## The 5 Skills
+## The 5 Steps
 
-### 1. `/design-context`
+Steps are invoked as `python workflow.py step <name>`. The `/design-*` names are the user-facing aliases (also used as Claude Code slash commands if `plugin.yaml` is installed).
+
+### 1. `context` (`/design-context`)
 **Purpose:** Understand the problem space before any design decisions.
 
 **Inputs (user provides at invocation):**
@@ -126,7 +134,7 @@ Each step runs a refinement loop before writing JSON:
 
 ---
 
-### 2. `/design-spec`
+### 2. `spec` (`/design-spec`)
 **Purpose:** Make explicit design decisions based on the gathered context.
 
 **Reads from:** `context.json` (fields: `problem_statement`, `open_questions`, `prototype_options`, `constraints`)
@@ -157,7 +165,7 @@ Each step runs a refinement loop before writing JSON:
 
 ---
 
-### 3. `/design-tests`
+### 3. `tests` (`/design-tests`)
 **Purpose:** Define the test strategy before implementation begins.
 
 **Reads from:** `context.json` + `spec.json` (selective fields)
@@ -191,13 +199,13 @@ Each step runs a refinement loop before writing JSON:
 
 ---
 
-### 4. `/review-iterate-commit`
+### 4. `review` (`/review-iterate-commit`)
 **Purpose:** Pre-commit review — catch regressions, version issues, linting issues; draft the commit.
 
 **Reads from:** `spec.json` + `tests.json` + live `git diff`
 
 **Claude tasks:**
-- Run linting (via Bash tool)
+- Run linting (via `run_bash` tool definition)
 - Review the diff against the spec (did we implement what we designed?)
 - Check for version upgrade concerns (dep bumps, breaking API changes)
 - Draft a commit message
@@ -222,7 +230,7 @@ Each step runs a refinement loop before writing JSON:
 
 ---
 
-### 5. `/merge`
+### 5. `merge` (`/merge`)
 **Purpose:** Wrap up — update changelog, docs, Claude context; verify nothing was left behind.
 
 **Reads from:** all prior JSON files
@@ -274,33 +282,34 @@ Each step runs a refinement loop before writing JSON:
 
 ## Open Questions (to resolve before implementation)
 
-1. **Skill invocation mechanism:** How exactly do Claude Code skills call out to Python? Need to verify the YAML skill schema — specifically whether a `command:` field runs `python workflow.py step context` directly or if the prompt itself issues a Bash call.
+1. **Tool scope per step:** Which tools does each step need? All steps likely need `read_file` and `run_bash`. Only `context` needs broad file traversal; `review` needs `git_diff`. Define the minimal tool set per step to avoid unnecessary surface area.
 
-2. **Distribution:** Does `workflow.py` install globally via pip, or run relative to the plugin directory? Affects how `plugin.yaml` references it and how users set up the plugin.
+2. **Distribution:** Install via `pip install -e .` from the plugin directory, or publish to PyPI? For open-source sharing, PyPI is better UX. For now, local editable install is fine.
 
-3. **API key:** The Python orchestrator needs `ANTHROPIC_API_KEY`. Convention: read from env var, fall back to `.env` in project root. Do not use Claude Code's internal credentials.
+3. **API key:** Read `ANTHROPIC_API_KEY` from env var; fall back to `.env` in the project root. Document this clearly in setup instructions.
 
-4. **IDE integration depth:** At minimum, skills appear as slash commands in Claude Code. Richer options (status bar showing current step, side panel) depend on what the Claude Code plugin API supports — investigate after the core workflow works.
+4. **Claude Code integration:** Verify how `plugin.yaml` should reference the CLI command so slash commands work correctly from the IDE. This is secondary — solve after the CLI works standalone.
 
 ---
 
 ## First Steps (Implementation Order)
 
-1. Verify Claude Code skill YAML schema — confirm how `command:` works and test a hello-world skill
+1. Set up `pyproject.toml` with `anthropic` and `click` (or `typer`) as deps; verify a basic SDK call works
 2. Scaffold `state.py` — the state manager is the foundation everything else depends on
-3. Build `/design-context` end-to-end — one working skill as the template for the rest
-4. Write `prompts/context.md` — iterate on the prompt with real usage before generalizing
-5. Add the remaining 4 skills following the same pattern
-6. Implement backward navigation and within-step iteration loop
-7. Token optimization pass — selective field injection, prompt caching, summarization hook
-8. Write setup docs — install instructions, `ANTHROPIC_API_KEY` config, adding plugin to a project
+3. Define `tools.py` — implement `read_file`, `run_bash`, `git_diff` as Anthropic SDK tool definitions
+4. Build `context` step end-to-end — one working step as the template for the rest
+5. Write `prompts/context.md` — iterate on the system prompt with real usage before generalizing
+6. Add the remaining 4 steps following the same pattern
+7. Implement backward navigation and within-step iteration loop
+8. Token optimization pass — selective field injection, prompt caching, summarization hook
+9. Write setup docs — install instructions, `ANTHROPIC_API_KEY` config, optional Claude Code integration
 
 ---
 
 ## Verification
 
-- Run `/design-context` on a real small feature; confirm `context.json` is written with correct schema
-- Run `/design-spec`; confirm it reads only the needed fields from `context.json` and produces valid `spec.json`
-- Navigate backward: re-run `/design-context`, verify all downstream JSONs are marked `pending`
+- Run `python workflow.py step context` on a real small feature; confirm `context.json` is written with correct schema
+- Run `python workflow.py step spec`; confirm it reads only the needed fields from `context.json` and produces valid `spec.json`
+- Navigate backward: re-run `context` step, verify all downstream JSONs are marked `pending`
 - Test iteration loop: give feedback mid-step, verify Claude refines without writing JSON until approved
-- Cost check: run a full workflow end-to-end, inspect API logs for model tiers and cache hit rate
+- Cost check: run a full workflow end-to-end, inspect Anthropic API logs for model tiers and cache hit rate
