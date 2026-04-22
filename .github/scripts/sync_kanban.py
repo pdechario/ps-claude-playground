@@ -10,7 +10,7 @@ import urllib.error
 
 import anthropic
 
-KANBAN_PATH = "claude/plugins/choose-your-own-implementation/KANBAN.md"
+KANBAN_PATH = "KANBAN.md"
 REPO = os.environ["GITHUB_REPOSITORY"]
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 VALID_STATUSES = {"todo", "in_progress", "done"}
