@@ -1,6 +1,6 @@
-# development-workflow — Design Spec
+# choose-your-own-implementation — Design Spec
 
-A Python CLI tool (using the Anthropic SDK directly) that guides software development through a structured, spec-driven workflow. Covers new feature development and bug fixes. Exposes 5 steps, each representing a phase. State persists in JSON files so work survives session restarts. Intended to be open-sourced.
+A Python CLI tool (using the Anthropic SDK directly) that guides software development through a structured, spec-driven workflow. Covers new feature development and bug fixes. Exposes 7 steps, each representing a phase. State persists in JSON files so work survives session restarts. The UX is choose-your-own-adventure style — at each decision point the tool presents branching options rather than a rigid linear pipeline. Intended to be open-sourced.
 
 Claude Code integration (slash commands) is an optional layer on top — the core tool runs standalone from any terminal.
 
@@ -44,12 +44,16 @@ claude/plugins/development-workflow/
 │   ├── context.py
 │   ├── spec.py
 │   ├── tests.py
+│   ├── code.py
+│   ├── run_tests.py
 │   ├── review.py
 │   └── merge.py
 ├── prompts/
 │   ├── context.md               ← system prompt template for each step
 │   ├── spec.md
 │   ├── tests.md
+│   ├── code.md
+│   ├── run_tests.md
 │   ├── review.md
 │   └── merge.md
 └── plugin.yaml                  ← optional: Claude Code slash command definitions
@@ -63,25 +67,44 @@ claude/plugins/development-workflow/
 ├── context.json        ← output of /design-context
 ├── spec.json           ← output of /design-spec
 ├── tests.json          ← output of /design-tests
+├── code.json           ← output of /design-code
+├── run_tests.json      ← output of /run-tests (results + chosen suite)
 ├── review.json         ← output of /review-iterate-commit
 └── merge.json          ← output of /merge
 ```
 
 ---
 
-## Workflow Navigation (Doubly-Linked List)
+## Workflow Navigation
 
-Steps are a linked list: `context ↔ spec ↔ tests ↔ review ↔ merge`
+Steps are a linked list: `context ↔ spec ↔ tests ↔ code ↔ run-tests ↔ review ↔ merge`
+
+### Choose Your Own Adventure UX
+
+The tool is not a rigid pipeline — at every decision point it presents numbered or lettered options and waits for the user to choose. This applies to:
+- Which direction to go (next step, back to revise, skip)
+- Which test suite to run in `run-tests`
+- How to respond to test failures (fix code, re-run subset, skip and note)
+- Whether to run optional substeps (e.g., e2e tests)
+
+The goal is that running the workflow feels engaging and in-control, not like being pushed through a conveyor belt.
 
 ### Forward (normal)
-After each step completes, the orchestrator suggests the next. User confirms before advancing.
+After each step completes, the orchestrator presents options like:
+```
+What next?
+  [1] Continue to → run-tests
+  [2] Revise this step
+  [3] Go back to spec
+  [4] Exit and resume later
+```
 
 ### Backward (revision)
 Going back from step N to step M:
 1. Mark step M as `in_progress`
 2. Mark all steps after M as `pending` (invalidated — their JSON is stale)
 3. User re-runs step M and approves the new output
-4. Orchestrator prompts to re-run each invalidated step in order (or auto-runs them)
+4. Orchestrator presents choices: auto-re-run invalidated steps, or prompt before each
 
 ### Within-step iteration
 Each step runs a refinement loop before writing JSON:
@@ -91,9 +114,29 @@ Each step runs a refinement loop before writing JSON:
 4. Loop exits on user approval (`approve` / `done` / empty enter)
 5. JSON is written only on approval
 
+### Decision Tree: `run-tests`
+`run-tests` has its own internal branching — it is not a simple pass/fail:
+
+```
+run-tests
+├── Choose suite:
+│   [1] Unit only (fast)
+│   [2] Unit + integration
+│   [3] Full suite (includes e2e) ← optional, prompted separately
+│   [4] Custom: pick specific test files
+│
+└── After results:
+    ├── All pass → suggest review
+    ├── Some fail →
+    │   [1] Go back to code step to fix
+    │   [2] Re-run only the failing tests
+    │   [3] Skip and note failures in review.json
+    └── E2e only → separate prompt: "Run e2e tests now? (slow, ~Xm)" [y/N]
+```
+
 ---
 
-## The 5 Steps
+## The 7 Steps
 
 Steps are invoked as `python workflow.py step <name>`. The `/design-*` names are the user-facing aliases (also used as Claude Code slash commands if `plugin.yaml` is installed).
 
@@ -199,10 +242,91 @@ Steps are invoked as `python workflow.py step <name>`. The `/design-*` names are
 
 ---
 
-### 4. `review` (`/review-iterate-commit`)
+### 4. `code` (`/design-code`)
+**Purpose:** Define the implementation plan — which files to touch, what to write, how to structure it.
+
+**Reads from:** `context.json` + `spec.json` (NOT `tests.json` — implementation is derived from the design, not the test strategy)
+
+**Claude tasks:**
+- Break the spec down into concrete implementation tasks
+- For each task: identify which file(s) to modify or create, what functions/classes/methods to add
+- Define function signatures and module interfaces
+- Note any new dependencies to add
+- Flag anything in the spec that is ambiguous from an implementation standpoint
+
+**Output schema — `code.json`:**
+```json
+{
+  "implementation_tasks": [
+    {
+      "description": "Add OAuth token validation middleware",
+      "files": ["src/auth/middleware.py"],
+      "functions": ["validate_oauth_token(token: str) -> User"],
+      "notes": "string"
+    }
+  ],
+  "new_dependencies": ["authlib==1.2.1"],
+  "implementation_questions": ["Should token refresh be handled here or in the client?"],
+  "step_status": "complete",
+  "timestamp": "ISO8601"
+}
+```
+
+**Model:** `claude-sonnet-4-6` — requires reasoning about the codebase structure and spec requirements together
+
+---
+
+### 5. `run-tests` (`/run-tests`)
+**Purpose:** Execute the test suite and handle failures before committing.
+
+**Reads from:** `tests.json` — the design-tests spec is the source of truth for correctness. Claude uses it to cross-reference actual results against what was designed: are the tests that were supposed to exist actually present? Are the edge cases from the spec covered? Does a failure indicate a bug in the implementation or a gap in the test design itself?
+
+Does NOT read `code.json` — code quality is assessed by running the tests, not by the implementation plan.
+
+**User chooses at runtime:**
+- Which suite to run: unit / unit + integration / full (with e2e) / custom
+- E2e tests are prompted separately ("Run e2e? ~Xm [y/N]") — not included by default
+- On failure: fix code (loop back to `code` step), re-run subset, or skip with a noted reason
+
+**Claude tasks:**
+- Execute the chosen test suite via `run_bash` tool
+- Parse test output to extract pass/fail counts, failure messages, and tracebacks
+- Cross-reference results against `tests.json`: flag any designed test cases that are missing or untested
+- Summarize failures in plain language, noting whether each failure is a code bug or a test design gap
+- Record which suites were run and their results
+
+**Output schema — `run_tests.json`:**
+```json
+{
+  "suites_run": ["unit", "integration"],
+  "e2e_run": false,
+  "results": {
+    "unit": {"passed": 42, "failed": 2, "skipped": 1},
+    "integration": {"passed": 8, "failed": 0, "skipped": 0}
+  },
+  "failures": [
+    {
+      "test": "test_validate_token_expired",
+      "file": "tests/auth/test_login.py",
+      "message": "AssertionError: expected 401, got 200",
+      "suggested_fix": "Token expiry check is missing in validate_oauth_token"
+    }
+  ],
+  "overall_status": "partial_failure | pass | fail",
+  "skipped_reason": "null | string (if user chose to skip failures)",
+  "step_status": "complete",
+  "timestamp": "ISO8601"
+}
+```
+
+**Model:** `claude-haiku-4-5-20251001` — mechanical test execution and output parsing; escalates to Sonnet if failures need diagnostic reasoning
+
+---
+
+### 6. `review` (`/review-iterate-commit`)
 **Purpose:** Pre-commit review — catch regressions, version issues, linting issues; draft the commit.
 
-**Reads from:** `spec.json` + `tests.json` + live `git diff`
+**Reads from:** `spec.json` + `tests.json` + `code.json` + `run_tests.json` + live `git diff`
 
 **Claude tasks:**
 - Run linting (via `run_bash` tool definition)
@@ -230,7 +354,7 @@ Steps are invoked as `python workflow.py step <name>`. The `/design-*` names are
 
 ---
 
-### 5. `merge` (`/merge`)
+### 7. `merge` (`/merge`)
 **Purpose:** Wrap up — update changelog, docs, Claude context; verify nothing was left behind.
 
 **Reads from:** all prior JSON files
@@ -275,6 +399,8 @@ Steps are invoked as `python workflow.py step <name>`. The `/design-*` names are
 | context | `claude-haiku-4-5-20251001` | Fast codebase exploration |
 | spec | `claude-sonnet-4-6` | Complex design reasoning |
 | tests | `claude-sonnet-4-6` | Deep edge case coverage |
+| code | `claude-sonnet-4-6` | Reasoning about codebase structure and spec together |
+| run-tests | `claude-haiku-4-5-20251001` (default) | Mechanical test execution; escalates to Sonnet on failures |
 | review | `claude-haiku-4-5-20251001` (default) | Mechanical; escalates to Sonnet on divergence |
 | merge | `claude-haiku-4-5-20251001` | Doc formatting |
 
@@ -299,7 +425,7 @@ Steps are invoked as `python workflow.py step <name>`. The `/design-*` names are
 3. Define `tools.py` — implement `read_file`, `run_bash`, `git_diff` as Anthropic SDK tool definitions
 4. Build `context` step end-to-end — one working step as the template for the rest
 5. Write `prompts/context.md` — iterate on the system prompt with real usage before generalizing
-6. Add the remaining 4 steps following the same pattern
+6. Add the remaining 6 steps following the same pattern
 7. Implement backward navigation and within-step iteration loop
 8. Token optimization pass — selective field injection, prompt caching, summarization hook
 9. Write setup docs — install instructions, `ANTHROPIC_API_KEY` config, optional Claude Code integration
@@ -310,6 +436,8 @@ Steps are invoked as `python workflow.py step <name>`. The `/design-*` names are
 
 - Run `python workflow.py step context` on a real small feature; confirm `context.json` is written with correct schema
 - Run `python workflow.py step spec`; confirm it reads only the needed fields from `context.json` and produces valid `spec.json`
+- Run `python workflow.py step run-tests` — choose unit-only suite, verify `run_tests.json` captures results; simulate a failure and confirm the branching options appear
 - Navigate backward: re-run `context` step, verify all downstream JSONs are marked `pending`
 - Test iteration loop: give feedback mid-step, verify Claude refines without writing JSON until approved
+- Test CYOA prompts: confirm that after each step, the tool presents numbered choices and waits for user input
 - Cost check: run a full workflow end-to-end, inspect Anthropic API logs for model tiers and cache hit rate
