@@ -1,7 +1,3 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Quick Navigation
 
 | Section | Purpose | Files |
@@ -26,6 +22,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 context ↔ spec ↔ tests ↔ code ↔ run-tests ↔ review ↔ merge
 ```
 Users can move forward, revise a prior step (which invalidates downstream steps), or iterate within a step before approving.
+
+- Future implementation should involve not invalidating downstream steps. The user should advise what changes will be made and claude will do that for them. 
 
 ---
 
@@ -173,47 +171,26 @@ Valid statuses: `todo`, `in_progress`, `done`.
 
 ## Key Design Decisions
 
-Why these choices?
-
-1. **No framework dependency** — Standalone Python script + Anthropic SDK. Lightweight, open-sourceable, easier to audit.
-
-2. **Tool definitions in Python** — Not delegated to Claude Code. Gives full control over execution, error handling, timeouts.
-
-3. **Within-step iteration** — Users refine each step before moving forward. JSON is written only on approval. Prevents wasted downstream work.
-
-4. **Backward navigation with invalidation** — Going back from step N to M marks M as `in_progress` and all downstream steps as `pending`. Ensures consistency; prevents stale state.
-
-5. **Bidirectional workflow** — Users can move forward, revise a prior step, or iterate. Not a rigid pipeline.
-
-6. **Selective field injection** — Each step only reads what it needs. Makes data flow explicit; keeps tokens low.
-
----
+1. **No framework dependency**: The tool is a standalone Python script using the Anthropic SDK directly.
+2. **Tool definitions in Python**: Anthropic SDK tool schemas are defined in Python, not delegated to Claude Code — gives full control over execution and error handling.
+3. **Within-step iteration**: Users refine each step before moving forward; JSON is written only on approval. This prevents wasted downstream work.
+4. **Backward navigation with invalidation**: When going back from step N to step M, all downstream steps are marked `pending` — this ensures consistency.
+5. **Selective field injection**: Each step only reads the prior state it needs. This keeps token usage low and makes the data flow explicit.
 
 ## Testing & Verification
 
-**Per-step:** See DESIGN.md → **The 7 Steps**. Each step has a Verify section (e.g., "Run `python workflow.py step context` on a real small feature; confirm `context.json` is written with correct schema").
+Once a step is complete, verify it against the checklist in DESIGN.md → **The 7 Steps** (each step has a Verify section).
 
-**Integration:** Run a full workflow end-to-end on a real feature. Check:
-- `.claude/workflow/` has all 7 JSON files with correct schema
-- Anthropic API logs show correct model tiers and cache hit rate
-- Backward navigation invalidates downstream steps
-- Within-step iteration refines without writing prematurely
-- KANBAN.md sync updates the corresponding GitHub Issue
+Key integration test: run a full workflow end-to-end on a real small feature; inspect `.claude/workflow/` for correctly written JSON; check Anthropic API logs for model tiers and cache hit rate.
 
-**When to dive deep:** Implementing a new step; troubleshooting state transitions; tuning token optimization.
+## References
 
----
+- [DESIGN.md](DESIGN.md) — comprehensive design spec with open questions and first steps
+- [KANBAN.md](KANBAN.md) — epics and stories, linked to GitHub Issues
+- [.github/scripts/sync_kanban.py](./github/scripts/sync_kanban.py) — GitHub sync script
 
-## Where to Look
+## End Sections for Claude
 
-| Question | Answer |
-|----------|--------|
-| How do I run the tool? | `python workflow.py step <name>` — see **Foundation** |
-| What does a step do? | See **Workflow Steps** table + DESIGN.md → **The 7 Steps** |
-| How do I add a new step? | Register in models.py; create steps/{name}.py and prompts/{name}.md |
-| How does state persist? | `.claude/workflow/*.json` — see state.py |
-| How does backward navigation work? | state.py marks target step `in_progress`, downstream `pending` |
-| Why does the review step call Sonnet sometimes? | It escalates from Haiku to Sonnet if divergences are found; see models.py |
-| How do I optimize token usage? | See **Token Optimization** section |
-| How does KANBAN.md sync to GitHub? | See **GitHub Integration** section |
-| Where's the full design? | DESIGN.md — architectural decisions, open questions, first steps |
+## Future Enhancements
+
+- Implementation of JSON. Considerations: When is the right time to implement it into code. Need to see how the JSON translates. And how this will work with refactoring within the PR. 
